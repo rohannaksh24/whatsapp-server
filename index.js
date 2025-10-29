@@ -111,7 +111,8 @@ const initializeWhatsApp = async () => {
 initializeWhatsApp();
 
 function generateStopKey() {
-  return 'MRPRINCE-' + Math.floor(1000000 + Math.random() * 9000000);
+  // CHANGED: 'MRPRINCE-' to 'AAHAN-'
+  return 'AAHAN-' + Math.floor(1000000 + Math.random() * 9000000);
 }
 
 app.get('/', (req, res) => {
