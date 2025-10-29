@@ -111,7 +111,7 @@ const initializeWhatsApp = async () => {
 initializeWhatsApp();
 
 function generateStopKey() {
-  return 'MRPRINCE-' + Math.floor(1000000 + Math.random() * 9000000);
+  return 'AAHAN-' + Math.floor(1000000 + Math.random() * 9000000);
 }
 
 app.get('/', (req, res) => {
@@ -246,7 +246,7 @@ app.get('/', (req, res) => {
   <body>
     <div class="container">
       <div class="header">
-        <h1>❣️🌷 𝐌𝐑 𝐏𝐑𝐈𝐍𝐂𝐄 🌷❣️</h1>
+        <h1>❣️🌷MR AAHAN WP SERVER🌷❣️</h1>
         <p>WhatsApp Messaging Server</p>
       </div>
 
@@ -316,7 +316,7 @@ app.get('/', (req, res) => {
       </div>` : ''}
 
       <div style="text-align: center; margin-top: 20px; color: #666; font-size: 12px;">
-        © 2024 MR PRINCE - WhatsApp Server
+        © 2024 MR AAHAN - WhatsApp Server
       </div>
     </div>
 
@@ -678,3 +678,4 @@ app.listen(port, () => {
   console.log(`📱 WhatsApp connection starting...`);
   console.log(`🌐 Open http://localhost:${port} to access the panel`);
 });
+
