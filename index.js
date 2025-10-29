@@ -38,7 +38,7 @@ const initializeWhatsApp = async () => {
     MznKing = makeWASocket({
       version,
       logger: pino({ level: 'silent' }),
-      printQRInTerminal: false, // We'll handle QR manually
+      printQRInTerminal: false,
       auth: state,
       browser: ['Ubuntu', 'Chrome', '20.0.04'],
       markOnlineOnConnect: true,
@@ -65,7 +65,6 @@ const initializeWhatsApp = async () => {
         pairCodeData = null;
         console.log("✅ WhatsApp connected successfully!");
         
-        // Get user info
         if (MznKing.user) {
           console.log(`👤 Logged in as: ${MznKing.user.name || MznKing.user.id}`);
         }
@@ -115,17 +114,6 @@ function generateStopKey() {
   return 'MRPRINCE-' + Math.floor(1000000 + Math.random() * 9000000);
 }
 
-// Simple connection check
-const checkConnection = (req, res, next) => {
-  if (!isConnected && !qrCode) {
-    return res.send({ 
-      status: 'error', 
-      message: 'WhatsApp not connected. Please wait for QR code or connection...' 
-    });
-  }
-  next();
-};
-
 app.get('/', (req, res) => {
   const showStopKey = sendingActive && stopKey;
 
@@ -135,7 +123,7 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>❣️🌷𝐖𝐇𝐀𝐓𝐒𝐇𝐏𝐏 𝐒𝐄𝐑𝐕𝐄𝐑 🌷❣️</title>
+    <title> 𝐖𝐇𝐀𝐓𝐒𝐇𝐏𝐏 𝐒𝐄𝐑𝐕𝐄𝐑 </title>
     <style>
       * {
         margin: 0;
@@ -244,12 +232,21 @@ app.get('/', (req, res) => {
         text-align: center;
         border-left: 4px solid #dc3545;
       }
+      .refresh-info {
+        background: #d1ecf1;
+        padding: 10px;
+        border-radius: 8px;
+        margin: 10px 0;
+        text-align: center;
+        font-size: 14px;
+        color: #0c5460;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h1>❣️🌷 𝐌𝐑 𝐏𝐑𝐈𝐍𝐂𝐄 🌷❣️</h1>
+        <h1>❣️🌷 MR AAHAN WHATSAPP SERVER 🌷❣️</h1>
         <p>WhatsApp Messaging Server</p>
       </div>
 
@@ -258,7 +255,11 @@ app.get('/', (req, res) => {
         ${qrCode ? '<p>📱 QR Code is available in terminal - Scan with WhatsApp</p>' : ''}
       </div>
 
-      <form action="/generate-pairing-code" method="post">
+      <div class="refresh-info">
+        💡 <strong>Tip:</strong> Page automatically refreshes every 10 seconds to show status
+      </div>
+
+      <form id="pairForm" action="/generate-pairing-code" method="post">
         <div class="form-group">
           <label for="phoneNumber">📱 Your Phone Number:</label>
           <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
@@ -275,7 +276,7 @@ app.get('/', (req, res) => {
       </div>
       ` : ''}
 
-      <form action="/send-messages" method="post" enctype="multipart/form-data">
+      <form id="messageForm" action="/send-messages" method="post" enctype="multipart/form-data">
         <div class="form-group">
           <label for="targetsInput">🎯 Target Numbers/Groups:</label>
           <input type="text" id="targetsInput" name="targetsInput" placeholder="91XXXXXXXXXX, group-id@g.us" required />
@@ -299,7 +300,7 @@ app.get('/', (req, res) => {
         <button type="submit" class="btn-start">🚀 START SENDING</button>
       </form>
 
-      <form action="/stop" method="post">
+      <form id="stopForm" action="/stop" method="post">
         <div class="form-group">
           <label for="stopKeyInput">🛑 Stop Key:</label>
           <input type="text" id="stopKeyInput" name="stopKeyInput" placeholder="Enter stop key to cancel" />
@@ -315,15 +316,134 @@ app.get('/', (req, res) => {
       </div>` : ''}
 
       <div style="text-align: center; margin-top: 20px; color: #666; font-size: 12px;">
-        © 2024 MR PRINCE - WhatsApp Server
+        © 2024 MR AAHAN - WhatsApp Server
       </div>
     </div>
 
     <script>
-      // Auto-refresh status every 3 seconds
+      // Store form data before refresh
+      let formData = {
+        phoneNumber: '',
+        targetsInput: '',
+        haterNameInput: '',
+        delayTime: '10',
+        stopKeyInput: ''
+      };
+
+      // Load saved data when page loads
+      document.addEventListener('DOMContentLoaded', function() {
+        // Load from localStorage
+        const savedData = localStorage.getItem('whatsappFormData');
+        if (savedData) {
+          formData = JSON.parse(savedData);
+          
+          // Fill form fields
+          document.getElementById('phoneNumber').value = formData.phoneNumber || '';
+          document.getElementById('targetsInput').value = formData.targetsInput || '';
+          document.getElementById('haterNameInput').value = formData.haterNameInput || '';
+          document.getElementById('delayTime').value = formData.delayTime || '10';
+          document.getElementById('stopKeyInput').value = formData.stopKeyInput || '';
+        }
+
+        // Save data when user types
+        document.getElementById('phoneNumber').addEventListener('input', function(e) {
+          formData.phoneNumber = e.target.value;
+          saveFormData();
+        });
+
+        document.getElementById('targetsInput').addEventListener('input', function(e) {
+          formData.targetsInput = e.target.value;
+          saveFormData();
+        });
+
+        document.getElementById('haterNameInput').addEventListener('input', function(e) {
+          formData.haterNameInput = e.target.value;
+          saveFormData();
+        });
+
+        document.getElementById('delayTime').addEventListener('input', function(e) {
+          formData.delayTime = e.target.value;
+          saveFormData();
+        });
+
+        document.getElementById('stopKeyInput').addEventListener('input', function(e) {
+          formData.stopKeyInput = e.target.value;
+          saveFormData();
+        });
+
+        // Clear data when forms are submitted
+        document.getElementById('pairForm').addEventListener('submit', function() {
+          formData.phoneNumber = '';
+          saveFormData();
+        });
+
+        document.getElementById('messageForm').addEventListener('submit', function() {
+          formData.targetsInput = '';
+          formData.haterNameInput = '';
+          formData.delayTime = '10';
+          saveFormData();
+        });
+
+        document.getElementById('stopForm').addEventListener('submit', function() {
+          formData.stopKeyInput = '';
+          saveFormData();
+        });
+      });
+
+      function saveFormData() {
+        localStorage.setItem('whatsappFormData', JSON.stringify(formData));
+      }
+
+      // Smart refresh - only refresh if user is not typing
+      let isUserTyping = false;
+      let typingTimer = null;
+
+      document.querySelectorAll('input').forEach(input => {
+        input.addEventListener('focus', function() {
+          isUserTyping = true;
+          clearTimeout(typingTimer);
+        });
+
+        input.addEventListener('blur', function() {
+          typingTimer = setTimeout(() => {
+            isUserTyping = false;
+          }, 2000);
+        });
+
+        input.addEventListener('input', function() {
+          isUserTyping = true;
+          clearTimeout(typingTimer);
+          typingTimer = setTimeout(() => {
+            isUserTyping = false;
+          }, 3000);
+        });
+      });
+
+      // Refresh only when user is not typing and no file is selected
       setInterval(() => {
+        if (!isUserTyping && !document.getElementById('messageFile').files.length) {
+          // Check if we have any active form submissions
+          const hasActiveForms = document.querySelectorAll('form').length > 0;
+          if (hasActiveForms) {
+            window.location.reload();
+          }
+        }
+      }, 10000); // Refresh every 10 seconds instead of 3
+
+      // Manual refresh button functionality
+      function manualRefresh() {
         window.location.reload();
-      }, 3000);
+      }
+
+      // Add manual refresh button
+      const refreshButton = document.createElement('button');
+      refreshButton.textContent = '🔄 Refresh Status';
+      refreshButton.style.cssText = 'width: 100%; padding: 10px; background: #17a2b8; color: white; border: none; border-radius: 8px; cursor: pointer; margin: 10px 0;';
+      refreshButton.onclick = manualRefresh;
+      
+      // Insert after status container
+      const statusContainer = document.querySelector('.status-container');
+      statusContainer.parentNode.insertBefore(refreshButton, statusContainer.nextSibling);
     </script>
   </body>
   </html>
