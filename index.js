@@ -2,7 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
-const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
 const qrcode = require('qrcode-terminal');
 const multer = require('multer');
 const app = express();
@@ -27,26 +27,22 @@ const upload = multer({ storage: storage });
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// WhatsApp connection setup
+// WhatsApp connection setup - SIMPLIFIED AND FIXED
 const initializeWhatsApp = async () => {
   try {
     console.log('🚀 Initializing WhatsApp connection...');
     
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-    const { version } = await fetchLatestBaileysVersion();
     
     MznKing = makeWASocket({
-      version,
       logger: pino({ level: 'silent' }),
-      printQRInTerminal: false,
+      printQRInTerminal: true,
       auth: state,
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
-      markOnlineOnConnect: true,
-      generateHighQualityLinkPreview: true,
+      browser: ['Chrome', 'Windows', '10.0.0'],
     });
 
-    MznKing.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr, isNewLogin } = update;
+    MznKing.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
       
       // Handle QR Code
       if (qr) {
@@ -54,7 +50,7 @@ const initializeWhatsApp = async () => {
         connectionStatus = "QR Code Ready - Scan with WhatsApp";
         console.log('\n📱 QR CODE RECEIVED - SCAN WITH WHATSAPP');
         qrcode.generate(qr, { small: true });
-        console.log('\n');
+        console.log('Scan the QR code above with your WhatsApp mobile app\n');
       }
       
       // Handle connection open
@@ -64,46 +60,37 @@ const initializeWhatsApp = async () => {
         qrCode = null;
         pairCodeData = null;
         console.log("✅ WhatsApp connected successfully!");
-        
-        if (MznKing.user) {
-          console.log(`👤 Logged in as: ${MznKing.user.name || MznKing.user.id}`);
-        }
       }
       
       // Handle connection close
       if (connection === "close") {
         isConnected = false;
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        connectionStatus = "❌ Disconnected";
         
-        console.log('🔌 Connection closed');
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
         
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.log("❌ Device logged out. Clearing auth...");
-          try {
-            fs.rmSync('./auth_info', { recursive: true, force: true });
-          } catch (e) {}
-          connectionStatus = "❌ Logged Out - Restart Required";
-        } else {
-          console.log("🔄 Reconnecting in 5 seconds...");
+        if (shouldReconnect) {
+          console.log("🔄 Reconnecting in 3 seconds...");
           connectionStatus = "🔄 Reconnecting...";
-          setTimeout(() => initializeWhatsApp(), 5000);
+          setTimeout(() => initializeWhatsApp(), 3000);
+        } else {
+          console.log("❌ Connection closed. Manual restart required.");
+          connectionStatus = "❌ Logged Out - Restart Required";
         }
       }
       
       // Handle connecting state
       if (connection === "connecting") {
         connectionStatus = "🔄 Connecting...";
-        console.log('🔄 Connecting to WhatsApp...');
       }
     });
 
     MznKing.ev.on('creds.update', saveCreds);
 
-    return MznKing;
   } catch (error) {
     console.error('❌ Setup error:', error);
-    connectionStatus = "❌ Connection Failed - Retrying...";
-    setTimeout(() => initializeWhatsApp(), 10000);
+    connectionStatus = "❌ Connection Failed";
+    setTimeout(() => initializeWhatsApp(), 5000);
   }
 };
 
@@ -111,8 +98,92 @@ const initializeWhatsApp = async () => {
 initializeWhatsApp();
 
 function generateStopKey() {
-  return 'AAHAN-' + Math.floor(1000000 + Math.random() * 9000000);
+  return 'AAHAN-' + Math.floor(100000 + Math.random() * 900000);
 }
+
+// Simple and reliable pairing code function
+app.post('/generate-pairing-code', async (req, res) => {
+  try {
+    const phoneNumber = req.body.phoneNumber;
+    
+    if (!phoneNumber) {
+      return res.send({ 
+        status: 'error', 
+        message: 'Phone number is required' 
+      });
+    }
+
+    // Clean phone number
+    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+    
+    // Basic validation
+    if (cleanNumber.length < 10) {
+      return res.send({ 
+        status: 'error', 
+        message: 'Please enter a valid phone number' 
+      });
+    }
+
+    console.log('📞 Requesting pairing code for:', cleanNumber);
+    
+    if (!MznKing) {
+      return res.send({ 
+        status: 'error', 
+        message: 'WhatsApp client not ready. Please wait...' 
+      });
+    }
+
+    // If already connected, show message
+    if (isConnected) {
+      return res.send({ 
+        status: 'success', 
+        message: '✅ Already connected to WhatsApp! No pairing needed.' 
+      });
+    }
+
+    // If QR code is available, suggest scanning instead
+    if (qrCode) {
+      return res.send({ 
+        status: 'info', 
+        message: '📱 QR Code is available. Please scan it instead of using pair code.' 
+      });
+    }
+
+    // Try to get pairing code with simple approach
+    try {
+      const pairCode = await MznKing.requestPairingCode(cleanNumber);
+      console.log('✅ Pairing code generated:', pairCode);
+      
+      pairCodeData = {
+        pairCode: pairCode,
+        phoneNumber: cleanNumber,
+        timestamp: new Date()
+      };
+      
+      res.send({ 
+        status: 'success', 
+        pairCode: pairCode,
+        message: `Pair code: ${pairCode} - Enter in WhatsApp Linked Devices`
+      });
+      
+    } catch (pairError) {
+      console.error('Pair code error:', pairError);
+      
+      // If pair code fails, suggest QR code method
+      return res.send({ 
+        status: 'error', 
+        message: 'Pair code failed. Please use QR code method from terminal.' 
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ General error:', error);
+    res.send({ 
+      status: 'error', 
+      message: 'System error. Please try QR code method.' 
+    });
+  }
+});
 
 app.get('/', (req, res) => {
   const showStopKey = sendingActive && stopKey;
@@ -123,7 +194,7 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>❣️🌷𝐖𝐇𝐀𝐓𝐒𝐇𝐏𝐏 𝐒𝐄𝐑𝐕𝐄𝐑 🌷❣️</title>
+    <title>WhatsApp Server</title>
     <style>
       * {
         margin: 0;
@@ -150,11 +221,8 @@ app.get('/', (req, res) => {
       }
       .header h1 {
         color: #333;
-        font-size: 28px;
+        font-size: 24px;
         margin-bottom: 10px;
-        background: linear-gradient(45deg, #ff6b6b, #ee5a24);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
       }
       .status-container {
         background: #f8f9fa;
@@ -232,38 +300,46 @@ app.get('/', (req, res) => {
         text-align: center;
         border-left: 4px solid #dc3545;
       }
-      .refresh-info {
+      .info-message {
         background: #d1ecf1;
-        padding: 10px;
-        border-radius: 8px;
-        margin: 10px 0;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 15px 0;
         text-align: center;
+        border-left: 4px solid #17a2b8;
+      }
+      .instructions {
+        background: #e2e3e5;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 15px 0;
         font-size: 14px;
-        color: #0c5460;
       }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h1>❣️🌷MR AAHAN WP SERVER🌷❣️</h1>
+        <h1>🌷 MR AAHAN WP SERVER 🌷</h1>
         <p>WhatsApp Messaging Server</p>
       </div>
 
       <div class="status-container ${isConnected ? '' : !qrCode ? 'status-disconnected' : 'status-connecting'}">
         <strong>Status:</strong> ${connectionStatus}
-        ${qrCode ? '<p>📱 QR Code is available in terminal - Scan with WhatsApp</p>' : ''}
+        ${qrCode ? '<p>📱 QR Code available in terminal - Scan with WhatsApp</p>' : ''}
       </div>
 
-      <div class="refresh-info">
-        💡 <strong>Tip:</strong> Page automatically refreshes every 10 seconds to show status
+      <div class="instructions">
+        <strong>📝 Instructions:</strong><br>
+        1. Check terminal for QR code and scan it<br>
+        2. OR use pair code method below<br>
+        3. Once connected, upload messages and start sending
       </div>
 
-      <form id="pairForm" action="/generate-pairing-code" method="post">
+      <form action="/generate-pairing-code" method="post">
         <div class="form-group">
           <label for="phoneNumber">📱 Your Phone Number:</label>
           <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
-          <small style="color: #666;">Enter your WhatsApp number with country code (91 for India)</small>
         </div>
         <button type="submit" class="btn-pair">🔗 GENERATE PAIR CODE</button>
       </form>
@@ -272,11 +348,12 @@ app.get('/', (req, res) => {
       <div class="pair-code-result">
         <h3>✅ Pair Code Generated!</h3>
         <p><strong>Code: ${pairCodeData.pairCode}</strong></p>
-        <p>Enter this code in WhatsApp → Linked Devices → Link a Device</p>
+        <p>Go to WhatsApp → Settings → Linked Devices → Link a Device</p>
+        <p>Enter this code when prompted</p>
       </div>
       ` : ''}
 
-      <form id="messageForm" action="/send-messages" method="post" enctype="multipart/form-data">
+      <form action="/send-messages" method="post" enctype="multipart/form-data">
         <div class="form-group">
           <label for="targetsInput">🎯 Target Numbers/Groups:</label>
           <input type="text" id="targetsInput" name="targetsInput" placeholder="91XXXXXXXXXX, group-id@g.us" required />
@@ -297,10 +374,11 @@ app.get('/', (req, res) => {
           <input type="number" id="delayTime" name="delayTime" min="5" value="10" required />
         </div>
         
-        <button type="submit" class="btn-start">🚀 START SENDING</button>
+        <button type="submit" class="btn-start" ${!isConnected ? 'disabled style="opacity:0.6;"' : ''}>🚀 START SENDING</button>
+        ${!isConnected ? '<p style="color:red; text-align:center; margin-top:10px;">⚠️ Connect WhatsApp first</p>' : ''}
       </form>
 
-      <form id="stopForm" action="/stop" method="post">
+      <form action="/stop" method="post">
         <div class="form-group">
           <label for="stopKeyInput">🛑 Stop Key:</label>
           <input type="text" id="stopKeyInput" name="stopKeyInput" placeholder="Enter stop key to cancel" />
@@ -321,219 +399,31 @@ app.get('/', (req, res) => {
     </div>
 
     <script>
-      // Store form data before refresh
-      let formData = {
-        phoneNumber: '',
-        targetsInput: '',
-        haterNameInput: '',
-        delayTime: '10',
-        stopKeyInput: ''
-      };
-
-      // Load saved data when page loads
-      document.addEventListener('DOMContentLoaded', function() {
-        // Load from localStorage
-        const savedData = localStorage.getItem('whatsappFormData');
-        if (savedData) {
-          formData = JSON.parse(savedData);
-          
-          // Fill form fields
-          document.getElementById('phoneNumber').value = formData.phoneNumber || '';
-          document.getElementById('targetsInput').value = formData.targetsInput || '';
-          document.getElementById('haterNameInput').value = formData.haterNameInput || '';
-          document.getElementById('delayTime').value = formData.delayTime || '10';
-          document.getElementById('stopKeyInput').value = formData.stopKeyInput || '';
-        }
-
-        // Save data when user types
-        document.getElementById('phoneNumber').addEventListener('input', function(e) {
-          formData.phoneNumber = e.target.value;
-          saveFormData();
-        });
-
-        document.getElementById('targetsInput').addEventListener('input', function(e) {
-          formData.targetsInput = e.target.value;
-          saveFormData();
-        });
-
-        document.getElementById('haterNameInput').addEventListener('input', function(e) {
-          formData.haterNameInput = e.target.value;
-          saveFormData();
-        });
-
-        document.getElementById('delayTime').addEventListener('input', function(e) {
-          formData.delayTime = e.target.value;
-          saveFormData();
-        });
-
-        document.getElementById('stopKeyInput').addEventListener('input', function(e) {
-          formData.stopKeyInput = e.target.value;
-          saveFormData();
-        });
-
-        // Clear data when forms are submitted
-        document.getElementById('pairForm').addEventListener('submit', function() {
-          formData.phoneNumber = '';
-          saveFormData();
-        });
-
-        document.getElementById('messageForm').addEventListener('submit', function() {
-          formData.targetsInput = '';
-          formData.haterNameInput = '';
-          formData.delayTime = '10';
-          saveFormData();
-        });
-
-        document.getElementById('stopForm').addEventListener('submit', function() {
-          formData.stopKeyInput = '';
-          saveFormData();
-        });
-      });
-
-      function saveFormData() {
-        localStorage.setItem('whatsappFormData', JSON.stringify(formData));
-      }
-
-      // Smart refresh - only refresh if user is not typing
-      let isUserTyping = false;
-      let typingTimer = null;
-
-      document.querySelectorAll('input').forEach(input => {
-        input.addEventListener('focus', function() {
-          isUserTyping = true;
-          clearTimeout(typingTimer);
-        });
-
-        input.addEventListener('blur', function() {
-          typingTimer = setTimeout(() => {
-            isUserTyping = false;
-          }, 2000);
-        });
-
-        input.addEventListener('input', function() {
-          isUserTyping = true;
-          clearTimeout(typingTimer);
-          typingTimer = setTimeout(() => {
-            isUserTyping = false;
-          }, 3000);
-        });
-      });
-
-      // Refresh only when user is not typing and no file is selected
-      setInterval(() => {
-        if (!isUserTyping && !document.getElementById('messageFile').files.length) {
-          // Check if we have any active form submissions
-          const hasActiveForms = document.querySelectorAll('form').length > 0;
-          if (hasActiveForms) {
-            window.location.reload();
-          }
-        }
-      }, 10000); // Refresh every 10 seconds instead of 3
-
-      // Manual refresh button functionality
-      function manualRefresh() {
+      // Simple auto-refresh every 8 seconds
+      setTimeout(() => {
         window.location.reload();
-      }
+      }, 8000);
 
-      // Add manual refresh button
-      const refreshButton = document.createElement('button');
-      refreshButton.textContent = '🔄 Refresh Status';
-      refreshButton.style.cssText = 'width: 100%; padding: 10px; background: #17a2b8; color: white; border: none; border-radius: 8px; cursor: pointer; margin: 10px 0;';
-      refreshButton.onclick = manualRefresh;
-      
-      // Insert after status container
-      const statusContainer = document.querySelector('.status-container');
-      statusContainer.parentNode.insertBefore(refreshButton, statusContainer.nextSibling);
+      // Focus management
+      document.addEventListener('DOMContentLoaded', function() {
+        const inputs = document.querySelectorAll('input');
+        inputs.forEach(input => {
+          // Save value on input
+          input.addEventListener('input', function() {
+            localStorage.setItem(input.id, input.value);
+          });
+          
+          // Load saved value
+          const savedValue = localStorage.getItem(input.id);
+          if (savedValue) {
+            input.value = savedValue;
+          }
+        });
+      });
     </script>
   </body>
   </html>
   `);
-});
-
-app.post('/generate-pairing-code', async (req, res) => {
-  try {
-    const phoneNumber = req.body.phoneNumber;
-    
-    if (!phoneNumber) {
-      return res.send({ 
-        status: 'error', 
-        message: 'Phone number is required' 
-      });
-    }
-
-    // Clean phone number - remove all non-digits
-    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    
-    // Validate Indian number (91 followed by 10 digits)
-    if (!cleanNumber.startsWith('91') || cleanNumber.length !== 12) {
-      return res.send({ 
-        status: 'error', 
-        message: 'Please enter valid Indian number: 91 followed by 10 digits (12 digits total)' 
-      });
-    }
-
-    console.log('📞 Requesting pairing code for:', cleanNumber);
-    
-    if (!MznKing) {
-      return res.send({ 
-        status: 'error', 
-        message: 'WhatsApp client not initialized. Please wait...' 
-      });
-    }
-
-    // Check if we're connected - if connected, no need for pair code
-    if (isConnected) {
-      return res.send({ 
-        status: 'success', 
-        message: 'Already connected to WhatsApp! No pair code needed.' 
-      });
-    }
-
-    // Request pairing code with timeout
-    const pairCodePromise = MznKing.requestPairingCode(cleanNumber);
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timeout')), 15000);
-    });
-
-    const pairCode = await Promise.race([pairCodePromise, timeoutPromise]);
-    
-    console.log('✅ Pairing code generated:', pairCode);
-    
-    // Store pair code data to display on page
-    pairCodeData = {
-      pairCode: pairCode,
-      phoneNumber: cleanNumber,
-      timestamp: new Date()
-    };
-    
-    res.send({ 
-      status: 'success', 
-      pairCode: pairCode,
-      message: `Pair code generated: ${pairCode}`
-    });
-    
-  } catch (error) {
-    console.error('❌ Pairing code error:', error);
-    
-    let errorMessage = 'Failed to generate pairing code';
-    
-    if (error.message.includes('timeout')) {
-      errorMessage = 'Request timeout. Please try again.';
-    } else if (error.message.includes('rate limit')) {
-      errorMessage = 'Rate limit exceeded. Please wait 5-10 minutes and try again.';
-    } else if (error.message.includes('not connected')) {
-      errorMessage = 'WhatsApp not connected. Please wait for connection...';
-    } else if (error.message.includes('invalid phone number')) {
-      errorMessage = 'Invalid phone number format. Use 91XXXXXXXXXX format.';
-    } else if (error.message.includes('connection')) {
-      errorMessage = 'Connection issue. Please wait and try again.';
-    }
-    
-    res.send({ 
-      status: 'error', 
-      message: errorMessage 
-    });
-  }
 });
 
 app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
@@ -591,7 +481,8 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     console.log(`🚀 Starting message sending:
       Targets: ${targets.length}
       Messages: ${messages.length}
-      Delay: ${intervalTime}s`);
+      Delay: ${intervalTime}s
+      Stop Key: ${stopKey}`);
 
     let msgIndex = 0;
 
@@ -604,6 +495,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
       }
 
       const fullMessage = `${haterName} ${messages[msgIndex]}`;
+      console.log(`📤 Sending ${msgIndex + 1}/${messages.length}: "${fullMessage}"`);
       
       for (const target of targets) {
         try {
@@ -620,7 +512,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
         } catch (err) {
           console.log(`❌ Failed to send to ${target}: ${err.message}`);
         }
-        await delay(500);
+        await delay(1000);
       }
 
       msgIndex++;
@@ -629,10 +521,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     res.redirect('/');
   } catch (error) {
     console.error('❌ Send messages error:', error);
-    res.send({ 
-      status: 'error', 
-      message: error.message 
-    });
+    res.send(`<script>alert('Error: ${error.message}'); window.location.href='/';</script>`);
   }
 });
 
@@ -644,38 +533,27 @@ app.post('/stop', (req, res) => {
     if (currentInterval) {
       clearInterval(currentInterval);
     }
-    console.log('🛑 Message sending stopped');
+    console.log('🛑 Message sending stopped by user');
     res.send(`
       <div style="text-align:center; padding:50px;">
-        <h2 style="color:green;">✅ Sending Stopped</h2>
-        <a href="/">← Back</a>
+        <h2 style="color:green;">✅ Sending Stopped Successfully</h2>
+        <a href="/" style="display:inline-block; margin-top:20px; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">← Back to Home</a>
       </div>
     `);
   } else {
     res.send(`
       <div style="text-align:center; padding:50px;">
         <h2 style="color:red;">❌ Invalid Stop Key</h2>
-        <a href="/">← Back</a>
+        <p>Please check the stop key and try again</p>
+        <a href="/" style="display:inline-block; margin-top:20px; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">← Back to Home</a>
       </div>
     `);
   }
-});
-
-// Health endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    whatsapp: {
-      connected: isConnected,
-      status: connectionStatus,
-      hasQR: !!qrCode
-    }
-  });
 });
 
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
   console.log(`📱 WhatsApp connection starting...`);
   console.log(`🌐 Open http://localhost:${port} to access the panel`);
+  console.log(`\n💡 IMPORTANT: Check terminal for QR code to connect WhatsApp\n`);
 });
-
