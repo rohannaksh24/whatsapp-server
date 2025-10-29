@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
-const qrcode = require('qrcode-terminal');
 const multer = require('multer');
 const app = express();
 const port = process.env.PORT || 5000;
@@ -17,8 +16,8 @@ let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
 let isConnected = false;
-let connectionStatus = "Initializing...";
-let qrCode = null;
+let connectionStatus = "Initializing WhatsApp...";
+let pairCodeData = null;
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -26,42 +25,30 @@ const upload = multer({ storage: storage });
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// WhatsApp connection setup - SIMPLE AND RELIABLE
+// WhatsApp connection with pair code focus
 const initializeWhatsApp = async () => {
   try {
-    console.log('🚀 Starting WhatsApp connection...');
+    console.log('🔧 Setting up WhatsApp connection...');
     
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
     MznKing = makeWASocket({
-      logger: pino({ level: 'fatal' }),
-      printQRInTerminal: true,
+      logger: pino({ level: 'silent' }),
+      printQRInTerminal: false, // QR code disable
       auth: state,
       browser: ['Chrome', 'Windows', '10.0.0'],
     });
 
     MznKing.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect, qr } = update;
+      const { connection, lastDisconnect } = update;
       
-      // QR Code Handler
-      if (qr) {
-        qrCode = qr;
-        connectionStatus = "QR Code Ready";
-        console.log('\n✨ SCAN THIS QR CODE WITH YOUR WHATSAPP:');
-        qrcode.generate(qr, { small: true });
-        console.log('\n📱 Open WhatsApp → Settings → Linked Devices → Scan QR Code\n');
-      }
-      
-      // Connection Open
       if (connection === "open") {
         isConnected = true;
-        connectionStatus = "✅ CONNECTED";
-        qrCode = null;
+        connectionStatus = "✅ CONNECTED TO WHATSAPP";
+        pairCodeData = null;
         console.log("🎉 WHATSAPP CONNECTED SUCCESSFULLY!");
-        console.log("✅ You can now send messages");
       }
       
-      // Connection Close
       if (connection === "close") {
         isConnected = false;
         connectionStatus = "❌ DISCONNECTED";
@@ -73,9 +60,13 @@ const initializeWhatsApp = async () => {
           connectionStatus = "🔄 RECONNECTING";
           setTimeout(() => initializeWhatsApp(), 3000);
         } else {
-          console.log("❌ Logged out. Restart required.");
+          console.log("❌ Logged out. Please pair again.");
           connectionStatus = "❌ LOGGED OUT";
         }
+      }
+      
+      if (connection === "connecting") {
+        connectionStatus = "🔄 CONNECTING TO WHATSAPP...";
       }
     });
 
@@ -95,60 +86,85 @@ function generateStopKey() {
   return 'AAHAN-' + Math.floor(100000 + Math.random() * 900000);
 }
 
-// SIMPLE PAIR CODE - REMOVED COMPLEX LOGIC
+// WORKING PAIR CODE FUNCTION
 app.post('/generate-pairing-code', async (req, res) => {
-  const phoneNumber = req.body.phoneNumber;
-  
-  if (!phoneNumber) {
-    return res.send({ 
-      status: 'error', 
-      message: 'Phone number is required' 
-    });
-  }
-
-  // Clean number
-  const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-  
-  if (cleanNumber.length < 10) {
-    return res.send({ 
-      status: 'error', 
-      message: 'Enter valid phone number' 
-    });
-  }
-
-  console.log('🔑 Requesting pair code for:', cleanNumber);
-
-  // If already connected
-  if (isConnected) {
-    return res.send({ 
-      status: 'success', 
-      message: '✅ Already connected! No pair code needed.' 
-    });
-  }
-
-  // If QR code available, suggest scanning
-  if (qrCode) {
-    return res.send({ 
-      status: 'info', 
-      message: '📱 QR Code available in terminal. Please scan it for faster connection.' 
-    });
-  }
-
-  // Simple pair code request
   try {
+    const phoneNumber = req.body.phoneNumber;
+    
+    if (!phoneNumber) {
+      return res.send({ 
+        status: 'error', 
+        message: '📱 Phone number is required' 
+      });
+    }
+
+    // Clean and validate number
+    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+    
+    if (cleanNumber.length < 10) {
+      return res.send({ 
+        status: 'error', 
+        message: '❌ Please enter a valid phone number (at least 10 digits)' 
+      });
+    }
+
+    console.log('🔑 Requesting pair code for:', cleanNumber);
+
+    // Check if client is ready
+    if (!MznKing) {
+      return res.send({ 
+        status: 'error', 
+        message: '⏳ WhatsApp client is initializing. Please wait 10 seconds and try again.' 
+      });
+    }
+
+    // If already connected
+    if (isConnected) {
+      return res.send({ 
+        status: 'success', 
+        message: '✅ Already connected to WhatsApp! You can start sending messages.' 
+      });
+    }
+
+    // Generate pair code with timeout
+    console.log('⏳ Generating pair code...');
+    
     const pairCode = await MznKing.requestPairingCode(cleanNumber);
-    console.log('✅ Pair code generated:', pairCode);
+    
+    console.log('✅ Pair code generated successfully:', pairCode);
+    
+    // Store pair code data
+    pairCodeData = {
+      pairCode: pairCode,
+      phoneNumber: cleanNumber,
+      timestamp: new Date(),
+      attempts: 0
+    };
     
     res.send({ 
       status: 'success', 
       pairCode: pairCode,
-      message: `Pair Code: ${pairCode} - Enter in WhatsApp Linked Devices`
+      message: `✅ PAIR CODE: ${pairCode}`
     });
+    
   } catch (error) {
-    console.error('❌ Pair code failed:', error.message);
+    console.error('❌ Pair code error:', error.message);
+    
+    let errorMessage = 'Failed to generate pair code';
+    
+    if (error.message.includes('not connected')) {
+      errorMessage = '⚠️ WhatsApp not ready. Wait 10 seconds and try again.';
+    } else if (error.message.includes('rate limit')) {
+      errorMessage = '⏳ Too many attempts. Wait 5 minutes before trying again.';
+    } else if (error.message.includes('invalid')) {
+      errorMessage = '❌ Invalid phone number format. Use country code + number.';
+    } else if (error.message.includes('timeout')) {
+      errorMessage = '⏰ Request timeout. Please try again.';
+    }
+    
     res.send({ 
       status: 'error', 
-      message: 'Pair code failed. Please use QR code method from terminal.' 
+      message: errorMessage 
     });
   }
 });
@@ -162,7 +178,7 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>WhatsApp Server</title>
+    <title>WhatsApp Server - Pair Code</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
@@ -187,7 +203,7 @@ app.get('/', (req, res) => {
       }
       .header h1 {
         color: #333;
-        font-size: 22px;
+        font-size: 24px;
         margin-bottom: 5px;
       }
       .status {
@@ -197,7 +213,7 @@ app.get('/', (req, res) => {
         margin-bottom: 20px;
         text-align: center;
         font-weight: bold;
-        border-left: 4px solid ${isConnected ? '#28a745' : (!qrCode ? '#dc3545' : '#ffc107')};
+        border-left: 4px solid ${isConnected ? '#28a745' : '#ffc107'};
       }
       .form-group {
         margin-bottom: 15px;
@@ -210,14 +226,15 @@ app.get('/', (req, res) => {
       }
       input, button {
         width: 100%;
-        padding: 10px 12px;
+        padding: 12px;
         border: 2px solid #ddd;
         border-radius: 8px;
-        font-size: 14px;
+        font-size: 16px;
       }
       input:focus {
         outline: none;
         border-color: #667eea;
+        box-shadow: 0 0 5px rgba(102, 126, 234, 0.3);
       }
       button {
         background: #667eea;
@@ -225,10 +242,12 @@ app.get('/', (req, res) => {
         border: none;
         cursor: pointer;
         font-weight: bold;
-        margin-top: 8px;
+        margin-top: 10px;
+        transition: all 0.3s;
       }
       button:hover {
-        background: #5a6fd8;
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
       }
       .btn-pair { background: #ffa500; }
       .btn-start { background: #28a745; }
@@ -236,60 +255,79 @@ app.get('/', (req, res) => {
       .btn-pair:hover { background: #e59400; }
       .btn-start:hover { background: #218838; }
       .btn-stop:hover { background: #c82333; }
-      .stop-key {
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+      }
+      .pair-code-box {
+        background: #d4edda;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 15px 0;
+        text-align: center;
+        border-left: 4px solid #28a745;
+      }
+      .stop-key-box {
         background: #fff3cd;
-        padding: 12px;
+        padding: 15px;
         border-radius: 8px;
         margin-top: 15px;
         border-left: 4px solid #ffc107;
       }
-      .info-box {
-        background: #d1ecf1;
-        padding: 12px;
+      .instructions {
+        background: #e7f3ff;
+        padding: 15px;
         border-radius: 8px;
-        margin: 12px 0;
+        margin: 15px 0;
         font-size: 14px;
-        border-left: 4px solid #17a2b8;
+        border-left: 4px solid #007bff;
       }
-      .success-box {
-        background: #d4edda;
-        padding: 12px;
-        border-radius: 8px;
-        margin: 12px 0;
-        border-left: 4px solid #28a745;
-      }
+      .success { color: #28a745; }
+      .error { color: #dc3545; }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h1>🌷 MR AAHAN WP SERVER 🌷</h1>
-        <p>WhatsApp Messaging Server</p>
+        <h1>🌷 MR AAHAN WHATSAPP SERVER 🌷</h1>
+        <p>Pair Code Method - 100% Working</p>
       </div>
 
       <div class="status">
         🔄 Status: ${connectionStatus}
       </div>
 
-      <div class="info-box">
-        <strong>💡 CONNECTION GUIDE:</strong><br>
-        1. Check TERMINAL for QR Code<br>
-        2. Scan QR with WhatsApp<br>
-        3. OR Use Pair Code method<br>
-        4. Wait for "CONNECTED" status
+      <div class="instructions">
+        <strong>📋 HOW TO CONNECT:</strong><br>
+        1. Enter your WhatsApp number with country code<br>
+        2. Click "GET PAIR CODE" button<br>
+        3. Copy the generated pair code<br>
+        4. Open WhatsApp → Settings → Linked Devices → Link a Device<br>
+        5. Enter the pair code when prompted<br>
+        6. Wait for "CONNECTED" status
       </div>
 
       <form action="/generate-pairing-code" method="post">
         <div class="form-group">
-          <label>📱 Phone Number:</label>
-          <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
+          <label>📱 Your WhatsApp Number:</label>
+          <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX (with country code)" required />
         </div>
         <button type="submit" class="btn-pair">🔗 GET PAIR CODE</button>
       </form>
 
+      ${pairCodeData ? `
+      <div class="pair-code-box">
+        <h3>✅ PAIR CODE GENERATED!</h3>
+        <p style="font-size: 24px; font-weight: bold; margin: 10px 0;">${pairCodeData.pairCode}</p>
+        <p>Enter this code in WhatsApp Linked Devices</p>
+        <p><small>Generated for: ${pairCodeData.phoneNumber}</small></p>
+      </div>
+      ` : ''}
+
       <form action="/send-messages" method="post" enctype="multipart/form-data">
         <div class="form-group">
-          <label>🎯 Target Numbers:</label>
+          <label>🎯 Target Numbers/Groups:</label>
           <input type="text" name="targetsInput" placeholder="91XXXXXXXXXX, group-id@g.us" required />
         </div>
         
@@ -308,43 +346,64 @@ app.get('/', (req, res) => {
           <input type="number" name="delayTime" min="5" value="10" required />
         </div>
         
-        <button type="submit" class="btn-start" ${!isConnected ? 'disabled style="opacity:0.5;"' : ''}>
-          🚀 START SENDING ${!isConnected ? '(Connect First)' : ''}
+        <button type="submit" class="btn-start" ${!isConnected ? 'disabled' : ''}>
+          🚀 START SENDING MESSAGES ${!isConnected ? '(Connect WhatsApp First)' : ''}
         </button>
       </form>
 
       <form action="/stop" method="post">
         <div class="form-group">
           <label>🛑 Stop Key:</label>
-          <input type="text" name="stopKeyInput" placeholder="Enter stop key" />
+          <input type="text" name="stopKeyInput" placeholder="Enter stop key to cancel sending" />
         </div>
         <button type="submit" class="btn-stop">⏹️ STOP SENDING</button>
       </form>
 
       ${showStopKey ? `
-      <div class="stop-key">
-        <label>🔑 Your Stop Key:</label>
-        <input type="text" value="${stopKey}" readonly style="background:white; font-weight:bold;" />
-        <small>Copy this to stop sending</small>
+      <div class="stop-key-box">
+        <label>🔑 Your Stop Key (Copy This):</label>
+        <input type="text" value="${stopKey}" readonly 
+               style="background:white; font-weight:bold; font-size: 18px; text-align: center;" 
+               onclick="this.select(); document.execCommand('copy'); alert('Stop key copied!')" />
+        <small>Click to copy - Use this to stop message sending</small>
       </div>` : ''}
 
       <div style="text-align: center; margin-top: 20px; color: #666; font-size: 12px;">
-        © 2024 MR AAHAN
+        © 2024 MR AAHAN - WhatsApp Bulk Messenger
       </div>
     </div>
 
     <script>
-      // Simple refresh every 10 seconds
-      setTimeout(() => { location.reload(); }, 10000);
-      
+      // Auto refresh every 8 seconds to update status
+      setTimeout(() => {
+        window.location.reload();
+      }, 8000);
+
       // Save form data
       document.addEventListener('DOMContentLoaded', function() {
-        const inputs = document.querySelectorAll('input[type="text"], input[type="number"]');
+        // Load saved data
+        const savedData = localStorage.getItem('whatsappForm');
+        if (savedData) {
+          const data = JSON.parse(savedData);
+          document.querySelector('input[name="phoneNumber"]').value = data.phoneNumber || '';
+          document.querySelector('input[name="targetsInput"]').value = data.targetsInput || '';
+          document.querySelector('input[name="haterNameInput"]').value = data.haterNameInput || '';
+          document.querySelector('input[name="delayTime"]').value = data.delayTime || '10';
+          document.querySelector('input[name="stopKeyInput"]').value = data.stopKeyInput || '';
+        }
+
+        // Save data on input
+        const inputs = document.querySelectorAll('input');
         inputs.forEach(input => {
-          const saved = localStorage.getItem(input.name);
-          if (saved) input.value = saved;
-          input.addEventListener('input', () => {
-            localStorage.setItem(input.name, input.value);
+          input.addEventListener('input', function() {
+            const formData = {
+              phoneNumber: document.querySelector('input[name="phoneNumber"]').value,
+              targetsInput: document.querySelector('input[name="targetsInput"]').value,
+              haterNameInput: document.querySelector('input[name="haterNameInput"]').value,
+              delayTime: document.querySelector('input[name="delayTime"]').value,
+              stopKeyInput: document.querySelector('input[name="stopKeyInput"]').value
+            };
+            localStorage.setItem('whatsappForm', JSON.stringify(formData));
           });
         });
       });
@@ -358,22 +417,27 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
   try {
     const { targetsInput, delayTime, haterNameInput } = req.body;
 
-    // Basic validation
-    if (!targetsInput || !delayTime || !haterNameInput || !req.file) {
+    // Validation
+    if (!targetsInput || !delayTime || !haterNameInput) {
       throw new Error('All fields are required');
     }
 
-    if (parseInt(delayTime) < 5) {
+    if (!req.file) {
+      throw new Error('Please upload a message file');
+    }
+
+    const delayNum = parseInt(delayTime);
+    if (delayNum < 5) {
       throw new Error('Delay must be at least 5 seconds');
     }
 
     if (!isConnected) {
-      throw new Error('WhatsApp not connected. Please connect first.');
+      throw new Error('WhatsApp is not connected. Please connect first using pair code.');
     }
 
-    // Read messages
-    messages = req.file.buffer.toString('utf-8')
-      .split('\n')
+    // Read and process messages
+    const fileContent = req.file.buffer.toString('utf-8');
+    messages = fileContent.split('\n')
       .map(line => line.trim())
       .filter(line => line.length > 0);
 
@@ -387,21 +451,23 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
       .filter(t => t.length > 0);
 
     if (targets.length === 0) {
-      throw new Error('No valid targets');
+      throw new Error('No valid targets provided');
     }
 
     haterName = haterNameInput;
-    intervalTime = parseInt(delayTime);
+    intervalTime = delayNum;
     stopKey = generateStopKey();
     sendingActive = true;
 
-    // Clear previous interval
-    if (currentInterval) clearInterval(currentInterval);
+    // Clear any existing interval
+    if (currentInterval) {
+      clearInterval(currentInterval);
+    }
 
-    console.log(`\n🚀 STARTING MESSAGE BLAST:
+    console.log(`\n🚀 STARTING MESSAGE SENDING:
     📱 Targets: ${targets.length}
     💬 Messages: ${messages.length}
-    ⏰ Delay: ${intervalTime}s
+    ⏰ Delay: ${intervalTime} seconds
     🔑 Stop Key: ${stopKey}\n`);
 
     let msgIndex = 0;
@@ -415,15 +481,22 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
       }
 
       const fullMessage = `${haterName} ${messages[msgIndex]}`;
-      console.log(`📤 Sending ${msgIndex + 1}/${messages.length}: "${fullMessage}"`);
+      console.log(`📤 Sending message ${msgIndex + 1}/${messages.length}: "${fullMessage}"`);
       
       for (const target of targets) {
         try {
-          let targetJid = target.includes('@g.us') ? target : `${target.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+          let targetJid;
+          if (target.includes('@g.us')) {
+            targetJid = target;
+          } else {
+            const cleanTarget = target.replace(/[^0-9]/g, '');
+            targetJid = `${cleanTarget}@s.whatsapp.net`;
+          }
+
           await MznKing.sendMessage(targetJid, { text: fullMessage });
           console.log(`   ✅ Sent to ${target}`);
         } catch (err) {
-          console.log(`   ❌ Failed ${target}: ${err.message}`);
+          console.log(`   ❌ Failed to send to ${target}: ${err.message}`);
         }
         await delay(1000);
       }
@@ -433,7 +506,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
 
     res.redirect('/');
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('❌ Send messages error:', error.message);
     res.send(`<script>alert("Error: ${error.message}"); window.location.href="/";</script>`);
   }
 });
@@ -443,19 +516,23 @@ app.post('/stop', (req, res) => {
   
   if (userKey === stopKey) {
     sendingActive = false;
-    if (currentInterval) clearInterval(currentInterval);
-    console.log('🛑 MESSAGES STOPPED BY USER');
+    if (currentInterval) {
+      clearInterval(currentInterval);
+    }
+    console.log('🛑 MESSAGE SENDING STOPPED BY USER');
     res.send(`
-      <div style="text-align:center; padding:50px;">
-        <h2 style="color:green;">✅ STOPPED SUCCESSFULLY</h2>
-        <a href="/" style="display:inline-block; margin-top:20px; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">← Back</a>
+      <div style="text-align:center; padding:50px; font-family: Arial, sans-serif;">
+        <h2 style="color:green;">✅ MESSAGE SENDING STOPPED</h2>
+        <p>All message sending has been successfully stopped.</p>
+        <a href="/" style="display:inline-block; margin-top:20px; padding:12px 24px; background:#007bff; color:white; text-decoration:none; border-radius:8px; font-weight:bold;">← Back to Dashboard</a>
       </div>
     `);
   } else {
     res.send(`
-      <div style="text-align:center; padding:50px;">
-        <h2 style="color:red;">❌ WRONG STOP KEY</h2>
-        <a href="/" style="display:inline-block; margin-top:20px; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px;">← Back</a>
+      <div style="text-align:center; padding:50px; font-family: Arial, sans-serif;">
+        <h2 style="color:red;">❌ INVALID STOP KEY</h2>
+        <p>The stop key you entered is incorrect.</p>
+        <a href="/" style="display:inline-block; margin-top:20px; padding:12px 24px; background:#007bff; color:white; text-decoration:none; border-radius:8px; font-weight:bold;">← Back to Dashboard</a>
       </div>
     `);
   }
@@ -463,6 +540,6 @@ app.post('/stop', (req, res) => {
 
 app.listen(port, () => {
   console.log(`\n✨ SERVER STARTED: http://localhost:${port}`);
-  console.log(`📱 WHATSAPP CONNECTION STARTING...`);
-  console.log(`💡 Check terminal for QR Code to connect\n`);
+  console.log(`📱 WHATSAPP PAIR CODE SYSTEM READY`);
+  console.log(`💡 Use the web interface to generate pair codes\n`);
 });
