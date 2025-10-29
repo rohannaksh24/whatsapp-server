@@ -5,3 +5,6 @@ auth_info/
 .DS_Store
 package-lock.json
 yarn.lock
+*.tmp
+*.temp
+session/
