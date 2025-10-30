@@ -1,11 +1,10 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const pino = require('pino');
 const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
 const multer = require('multer');
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
 let MznKing;
 let messages = null;
@@ -22,34 +21,56 @@ const upload = multer({ storage: storage });
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Simple logger since pino might not be available
+const logger = {
+  info: (msg) => console.log(`[INFO] ${msg}`),
+  error: (msg) => console.error(`[ERROR] ${msg}`),
+  warn: (msg) => console.warn(`[WARN] ${msg}`)
+};
+
 const setupBaileys = async () => {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-  const connectToWhatsApp = async () => {
-    MznKing = makeWASocket({
-      logger: pino({ level: 'silent' }),
-      auth: state,
-    });
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    const connectToWhatsApp = async () => {
+      MznKing = makeWASocket({
+        printQRInTerminal: true,
+        auth: state,
+      });
 
-    MznKing.ev.on('connection.update', async (s) => {
-      const { connection, lastDisconnect } = s;
-      if (connection === "open") {
-        console.log("WhatsApp connected.");
-      }
-      if (connection === "close" && lastDisconnect?.error) {
-        const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          console.log("Reconnecting...");
-          await connectToWhatsApp();
-        } else {
-          console.log("Connection closed. Restart required.");
+      MznKing.ev.on('connection.update', async (s) => {
+        const { connection, lastDisconnect, qr } = s;
+        
+        if (qr) {
+          logger.info('QR Code received');
         }
-      }
-    });
+        
+        if (connection === "open") {
+          logger.info("WhatsApp connected successfully.");
+        }
+        
+        if (connection === "close") {
+          const statusCode = lastDisconnect?.error?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          
+          logger.warn(`Connection closed. Status: ${statusCode}`);
+          
+          if (shouldReconnect) {
+            logger.info("Reconnecting...");
+            await connectToWhatsApp();
+          } else {
+            logger.error("Connection closed. Please restart the application.");
+          }
+        }
+      });
 
-    MznKing.ev.on('creds.update', saveCreds);
-    return MznKing;
-  };
-  await connectToWhatsApp();
+      MznKing.ev.on('creds.update', saveCreds);
+      return MznKing;
+    };
+    
+    await connectToWhatsApp();
+  } catch (error) {
+    logger.error(`Setup error: ${error.message}`);
+  }
 };
 
 setupBaileys();
@@ -202,6 +223,23 @@ app.get('/', (req, res) => {
         font-size: 12px;
         color: rgba(255, 255, 255, 0.6);
       }
+      
+      .status {
+        padding: 10px;
+        border-radius: 8px;
+        margin: 10px 0;
+        font-size: 14px;
+      }
+      
+      .status.connected {
+        background: rgba(0, 255, 0, 0.2);
+        border: 1px solid rgba(0, 255, 0, 0.5);
+      }
+      
+      .status.disconnected {
+        background: rgba(255, 0, 0, 0.2);
+        border: 1px solid rgba(255, 0, 0, 0.5);
+      }
     </style>
   </head>
   <body>
@@ -263,10 +301,11 @@ app.get('/', (req, res) => {
 app.post('/generate-pairing-code', async (req, res) => {
   const phoneNumber = req.body.phoneNumber;
   try {
-    // Modify the pairing code request to show "Ubuntu" as the client name
-    const pairCode = await MznKing.requestPairingCode(phoneNumber, {
-      clientName: "Ubuntu"
-    });
+    if (!MznKing) {
+      throw new Error('WhatsApp is not initialized yet. Please wait...');
+    }
+    
+    const pairCode = await MznKing.requestPairingCode(phoneNumber.trim());
     
     res.send(`
       <!DOCTYPE html>
@@ -397,35 +436,64 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
   try {
     const { targetsInput, delayTime, haterNameInput } = req.body;
 
+    if (!MznKing) {
+      throw new Error('WhatsApp is not connected. Please wait for connection.');
+    }
+
     haterName = haterNameInput;
     intervalTime = parseInt(delayTime, 10);
 
-    if (!req.file) throw new Error('No message file uploaded');
+    if (intervalTime < 5) {
+      throw new Error('Delay time must be at least 5 seconds');
+    }
+
+    if (!req.file) {
+      throw new Error('No message file uploaded');
+    }
+
     messages = req.file.buffer.toString('utf-8').split('\n').filter(Boolean);
+    
+    if (messages.length === 0) {
+      throw new Error('Message file is empty');
+    }
+
     targets = targetsInput.split(',').map(t => t.trim());
+    
+    if (targets.length === 0) {
+      throw new Error('No targets specified');
+    }
 
     stopKey = generateStopKey();
     sendingActive = true;
 
-    if (currentInterval) clearInterval(currentInterval);
+    if (currentInterval) {
+      clearInterval(currentInterval);
+    }
+
     let msgIndex = 0;
 
     currentInterval = setInterval(async () => {
       if (!sendingActive || msgIndex >= messages.length) {
         clearInterval(currentInterval);
         sendingActive = false;
+        logger.info('Message sending completed or stopped');
         return;
       }
 
       const fullMessage = `${haterName} ${messages[msgIndex]}`;
+      
       for (const target of targets) {
-        const suffix = target.endsWith('@g.us') ? '' : '@s.whatsapp.net';
         try {
-          await MznKing.sendMessage(target + suffix, { text: fullMessage });
-          console.log(`Sent to ${target}`);
+          // Check if target is a group ID or individual number
+          const formattedTarget = target.endsWith('@g.us') ? target : target.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+          await MznKing.sendMessage(formattedTarget, { text: fullMessage });
+          logger.info(`Sent message ${msgIndex + 1} to ${target}`);
         } catch (err) {
-          console.log(`Error sending to ${target}: ${err.message}`);
+          logger.error(`Error sending to ${target}: ${err.message}`);
         }
+        
+        // Small delay between sends to avoid rate limiting
+        await delay(1000);
       }
 
       msgIndex++;
@@ -490,7 +558,10 @@ app.post('/stop', (req, res) => {
   const userKey = req.body.stopKeyInput;
   if (userKey === stopKey) {
     sendingActive = false;
-    if (currentInterval) clearInterval(currentInterval);
+    if (currentInterval) {
+      clearInterval(currentInterval);
+      currentInterval = null;
+    }
     return res.send(`
       <!DOCTYPE html>
       <html>
@@ -597,5 +668,6 @@ app.post('/stop', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  logger.info(`Server running on http://localhost:${port}`);
+  logger.info('Initializing WhatsApp connection...');
 });
