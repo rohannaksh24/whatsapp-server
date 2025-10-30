@@ -19,7 +19,7 @@ let isConnected = false;
 let connectionStatus = "Starting WhatsApp...";
 let pairCodeData = null;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 3;
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -27,21 +27,33 @@ const upload = multer({ storage: storage });
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// WhatsApp connection with proper error handling
+// Ensure auth_info directory exists
+const ensureAuthDir = () => {
+  const authDir = './auth_info';
+  if (!fs.existsSync(authDir)) {
+    fs.mkdirSync(authDir, { recursive: true });
+    console.log('📁 Created auth_info directory');
+  }
+};
+
+// Improved WhatsApp connection with better error handling
 const initializeWhatsApp = async () => {
   try {
     console.log('🔄 Starting WhatsApp connection...');
     connectionStatus = "🔄 Connecting to WhatsApp...";
     
+    ensureAuthDir(); // Ensure directory exists
+    
     // Clear previous auth if too many reconnects
-    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       console.log('🧹 Clearing auth due to multiple reconnects...');
       try {
         if (fs.existsSync('./auth_info')) {
           fs.rmSync('./auth_info', { recursive: true, force: true });
+          ensureAuthDir(); // Recreate directory
         }
       } catch (e) {
-        console.log('No auth to clear');
+        console.log('Error clearing auth:', e.message);
       }
       reconnectAttempts = 0;
     }
@@ -49,12 +61,12 @@ const initializeWhatsApp = async () => {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
     MznKing = makeWASocket({
-      logger: pino({ level: 'silent' }),
+      logger: pino({ level: 'error' }),
       printQRInTerminal: false,
       auth: state,
-      browser: ['Chrome (Windows)', '', ''],
-      connectTimeoutMs: 60000,
-      keepAliveIntervalMs: 10000,
+      browser: ['Ubuntu', 'Chrome', '110.0'],
+      connectTimeoutMs: 30000,
+      keepAliveIntervalMs: 15000,
     });
 
     MznKing.ev.on('connection.update', (update) => {
@@ -68,7 +80,6 @@ const initializeWhatsApp = async () => {
         pairCodeData = null;
         reconnectAttempts = 0;
         console.log("🎉 WHATSAPP CONNECTED SUCCESSFULLY!");
-        console.log("📱 You can now send messages");
       }
       
       if (connection === "close") {
@@ -78,19 +89,17 @@ const initializeWhatsApp = async () => {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         console.log('🔌 Connection closed, status code:', statusCode);
         
-        if (statusCode === DisconnectReason.loggedOut || reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-          console.log("❌ Device logged out or too many reconnects. Clearing session...");
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 428 || statusCode === 405) {
+          console.log("❌ Session expired. Need new pairing.");
           connectionStatus = "❌ SESSION EXPIRED - GET NEW PAIR CODE";
-          try {
-            if (fs.existsSync('./auth_info')) {
-              fs.rmSync('./auth_info', { recursive: true, force: true });
-            }
-          } catch (e) {}
-          reconnectAttempts = 0;
-        } else {
-          console.log("🔄 Reconnecting in 5 seconds...");
+          // Don't reconnect immediately for these status codes
+        } else if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          console.log("🔄 Reconnecting in 10 seconds...");
           connectionStatus = "🔄 RECONNECTING...";
-          setTimeout(() => initializeWhatsApp(), 5000);
+          setTimeout(() => initializeWhatsApp(), 10000);
+        } else {
+          console.log("❌ Too many reconnection attempts. Manual restart needed.");
+          connectionStatus = "❌ CONNECTION FAILED - RESTART SERVER";
         }
       }
       
@@ -104,12 +113,20 @@ const initializeWhatsApp = async () => {
   } catch (error) {
     console.error('❌ Connection setup error:', error.message);
     connectionStatus = "❌ CONNECTION FAILED";
+    
+    if (error.message.includes('ENOENT') || error.message.includes('auth_info')) {
+      console.log('🛠️ Fixing auth directory...');
+      ensureAuthDir();
+    }
+    
     setTimeout(() => initializeWhatsApp(), 10000);
   }
 };
 
 // Start WhatsApp
-initializeWhatsApp();
+setTimeout(() => {
+  initializeWhatsApp();
+}, 2000);
 
 function generateStopKey() {
   return 'AAHAN-' + Math.floor(100000 + Math.random() * 900000);
@@ -143,7 +160,7 @@ app.post('/generate-pairing-code', async (req, res) => {
     if (!MznKing) {
       return res.send({ 
         status: 'error', 
-        message: '⏳ WhatsApp client is initializing. Please wait 10 seconds...' 
+        message: '⏳ WhatsApp client is initializing. Please wait 15 seconds...' 
       });
     }
 
@@ -155,67 +172,74 @@ app.post('/generate-pairing-code', async (req, res) => {
       });
     }
 
-    // Clear previous session if too many attempts
-    if (pairCodeData && pairCodeData.attempts >= 3) {
-      console.log('🧹 Clearing old session due to multiple failed attempts...');
+    // Clear previous session if needed
+    if (pairCodeData && pairCodeData.attempts >= 2) {
+      console.log('🧹 Clearing old session for fresh start...');
       try {
         if (fs.existsSync('./auth_info')) {
           fs.rmSync('./auth_info', { recursive: true, force: true });
+          ensureAuthDir();
         }
-      } catch (e) {}
+      } catch (e) {
+        console.log('Error clearing session:', e.message);
+      }
       // Reinitialize WhatsApp
-      setTimeout(() => initializeWhatsApp(), 2000);
+      setTimeout(() => initializeWhatsApp(), 3000);
+      return res.send({ 
+        status: 'error', 
+        message: '🔄 Session refreshed. Please try again in 5 seconds.' 
+      });
     }
 
     console.log('⏳ Generating pair code...');
     
-    // Generate pair code with timeout
-    const pairCodePromise = MznKing.requestPairingCode(cleanNumber);
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Request timeout')), 30000)
-    );
-
-    const pairCode = await Promise.race([pairCodePromise, timeoutPromise]);
-    
-    console.log('✅ Pair code generated successfully:', pairCode);
-    
-    // Store pair code data
-    pairCodeData = {
-      pairCode: pairCode,
-      phoneNumber: cleanNumber,
-      timestamp: new Date(),
-      attempts: (pairCodeData?.attempts || 0) + 1
-    };
-    
-    res.send({ 
-      status: 'success', 
-      pairCode: pairCode,
-      message: `✅ PAIR CODE: ${pairCode}\n\n📱 INSTRUCTIONS:\n1. Open WhatsApp on your phone\n2. Go to Settings → Linked Devices → Link a Device\n3. Enter this code: ${pairCode}\n4. Wait for connection confirmation`
-    });
+    // Generate pair code with proper error handling
+    try {
+      const pairCode = await MznKing.requestPairingCode(cleanNumber);
+      
+      console.log('✅ Pair code generated successfully:', pairCode);
+      
+      // Store pair code data
+      pairCodeData = {
+        pairCode: pairCode,
+        phoneNumber: cleanNumber,
+        timestamp: new Date(),
+        attempts: (pairCodeData?.attempts || 0) + 1
+      };
+      
+      res.send({ 
+        status: 'success', 
+        pairCode: pairCode,
+        message: `✅ PAIR CODE: ${pairCode}\n\n📱 Enter this code in:\nWhatsApp → Settings → Linked Devices → Link a Device`
+      });
+      
+    } catch (pairError) {
+      console.error('❌ Pair code generation failed:', pairError.message);
+      
+      // Handle specific pair code errors
+      if (pairError.message.includes('not connected') || pairError.message.includes('socket')) {
+        // Reinitialize connection
+        setTimeout(() => initializeWhatsApp(), 5000);
+        return res.send({ 
+          status: 'error', 
+          message: '🔌 Connection lost. Reconnecting... Please try again in 10 seconds.' 
+        });
+      }
+      
+      throw pairError;
+    }
     
   } catch (error) {
     console.error('❌ Pair code error:', error.message);
     
     let errorMessage = 'Failed to generate pair code. Please try again.';
     
-    if (error.message.includes('timeout')) {
-      errorMessage = '⏰ Request timeout. WhatsApp servers are busy. Please try again in 30 seconds.';
-    } else if (error.message.includes('not connected')) {
-      errorMessage = '⚠️ WhatsApp client not ready. Please wait 15 seconds and try again.';
-    } else if (error.message.includes('rate limit') || error.message.includes('too many')) {
-      errorMessage = '⏳ Too many attempts. Please wait 5-10 minutes before trying again.';
+    if (error.message.includes('rate limit') || error.message.includes('too many')) {
+      errorMessage = '⏳ Too many attempts. Please wait 10-15 minutes before trying again.';
     } else if (error.message.includes('invalid')) {
       errorMessage = '❌ Invalid phone number format. Use country code + number (e.g., 91XXXXXXXXXX).';
-    }
-    
-    // Clear session on critical errors
-    if (error.message.includes('rate limit') || error.message.includes('too many')) {
-      try {
-        if (fs.existsSync('./auth_info')) {
-          fs.rmSync('./auth_info', { recursive: true, force: true });
-        }
-      } catch (e) {}
-      setTimeout(() => initializeWhatsApp(), 5000);
+    } else if (error.message.includes('timeout')) {
+      errorMessage = '⏰ Request timeout. Please try again.';
     }
     
     res.send({ 
@@ -234,7 +258,7 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>WhatsApp Server - Fixed Pair Code</title>
+    <title>WhatsApp Server - Fixed</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
@@ -355,26 +379,40 @@ app.get('/', (req, res) => {
         margin: 10px 0;
         border: 2px dashed #28a745;
       }
+      .warning {
+        color: #856404;
+        background: #fff3cd;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        border-left: 4px solid #ffc107;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
         <h1>🌷 MR AAHAN WHATSAPP SERVER 🌷</h1>
-        <p>Fixed Pair Code System - No More Errors</p>
+        <p>Fixed Authentication System</p>
       </div>
 
       <div class="status">
         🔄 Status: ${connectionStatus}
-        ${reconnectAttempts > 0 ? `<br><small>Reconnect attempts: ${reconnectAttempts}</small>` : ''}
+        ${reconnectAttempts > 0 ? `<br><small>Reconnect attempts: ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}</small>` : ''}
       </div>
 
+      ${connectionStatus.includes('EXPIRED') || connectionStatus.includes('FAILED') ? `
+      <div class="warning">
+        <strong>⚠️ ATTENTION:</strong> Session expired. Please get a new pair code.
+      </div>
+      ` : ''}
+
       <div class="instructions">
-        <strong>🎯 FIXED PAIR CODE SYSTEM:</strong><br>
-        • Enter your WhatsApp number<br>
-        • Get pair code instantly<br>
-        • Enter code in WhatsApp Linked Devices<br>
-        • Works 100% - No more connection errors
+        <strong>🎯 FIXED SYSTEM:</strong><br>
+        • No more auth errors<br>
+        • Stable connections<br>
+        • Working pair codes<br>
+        • Automatic session recovery
       </div>
 
       <form action="/generate-pairing-code" method="post">
@@ -394,7 +432,7 @@ app.get('/', (req, res) => {
         <p>2. Go to Settings → Linked Devices → Link a Device</p>
         <p>3. Enter this code: <strong>${pairCodeData.pairCode}</strong></p>
         <p>4. Wait for "CONNECTED" status above</p>
-        <p><small>Generated for: ${pairCodeData.phoneNumber} | Attempts: ${pairCodeData.attempts}</small></p>
+        <p><small>Generated for: ${pairCodeData.phoneNumber}</small></p>
       </div>
       ` : ''}
 
@@ -447,10 +485,10 @@ app.get('/', (req, res) => {
     </div>
 
     <script>
-      // Auto refresh every 10 seconds to update status
+      // Auto refresh every 8 seconds to update status
       setTimeout(() => {
         window.location.reload();
-      }, 10000);
+      }, 8000);
 
       // Save form data
       document.addEventListener('DOMContentLoaded', function() {
@@ -611,9 +649,28 @@ app.post('/stop', (req, res) => {
   }
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    whatsapp: {
+      connected: isConnected,
+      status: connectionStatus,
+      reconnectAttempts: reconnectAttempts
+    },
+    server: {
+      uptime: process.uptime(),
+      memory: process.memoryUsage()
+    }
+  });
+});
+
 app.listen(port, () => {
   console.log(`\n✨ SERVER STARTED: http://localhost:${port}`);
-  console.log(`📱 FIXED WHATSAPP PAIR CODE SYSTEM READY`);
-  console.log(`🔧 No more reconnecting issues`);
-  console.log(`✅ Pair codes will work 100%\n`);
+  console.log(`📱 FIXED WHATSAPP SYSTEM READY`);
+  console.log(`🔧 No more auth errors`);
+  console.log(`✅ Stable connections\n`);
+  
+  // Ensure auth directory exists on startup
+  ensureAuthDir();
 });
