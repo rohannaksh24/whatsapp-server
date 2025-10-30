@@ -1,6 +1,7 @@
 const express = require('express');
 const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason, Browsers } = require("@whiskeysockets/baileys");
-const multer = require('multer'); // Secure version 2.0.2
+const multer = require('multer');
+const qrcode = require('qrcode'); // For web-based QR code display
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -12,6 +13,7 @@ let haterName = null;
 let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
+let currentQR = null; // Store QR code for web display
 
 // Multer configuration
 const storage = multer.memoryStorage();
@@ -40,27 +42,41 @@ const setupBaileys = async () => {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     const connect = async () => {
       MznKing = makeWASocket({
-        printQRInTerminal: true,
         auth: state,
-        browser: Browsers.macOS('Chrome'), // Valid browser config for pairing
-        logger: require('pino')({ level: 'debug' }), // Debug logging for pairing issues
-        markOnlineOnConnect: false // Avoid rate limits
+        browser: Browsers.ubuntu('Chrome'), // Stable browser config
+        logger: require('pino')({ level: 'debug' }),
+        markOnlineOnConnect: false,
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false
       });
 
       MznKing.ev.on('connection.update', async update => {
         const { connection, lastDisconnect, qr, isOnline } = update;
-        if (qr) logger.info('QR Code generated. Scan in WhatsApp > Linked Devices.');
-        if (connection === 'open') logger.info('WhatsApp connected successfully.');
+        if (qr) {
+          logger.info('QR Code generated.');
+          currentQR = qr; // Store for web display
+          try {
+            const qrUrl = await qrcode.toDataURL(qr);
+            logger.info('QR code available at /qr');
+          } catch (err) {
+            logger.error(`QR generation error: ${err.message}`);
+          }
+        }
+        if (connection === 'open') {
+          logger.info('WhatsApp connected successfully.');
+          currentQR = null; // Clear QR on successful connection
+        }
         if (connection === 'connecting') logger.info('Connecting to WhatsApp...');
         if (connection === 'close') {
           const code = lastDisconnect?.error?.output?.statusCode;
           const shouldReconnect = code !== DisconnectReason.loggedOut;
           logger.warn(`Connection closed. Status: ${code}`);
           if (shouldReconnect) {
-            logger.info('Reconnecting in 5 seconds...');
-            setTimeout(connect, 5000);
+            logger.info('Reconnecting in 10 seconds...');
+            setTimeout(connect, 10000); // Increased timeout
           } else {
             logger.error('Logged out. Delete ./auth_info and restart.');
+            currentQR = null;
           }
         }
       });
@@ -70,7 +86,7 @@ const setupBaileys = async () => {
     await connect();
   } catch (error) {
     logger.error(`Setup error: ${error.message}`);
-    setTimeout(setupBaileys, 10000);
+    setTimeout(setupBaileys, 15000);
   }
 };
 setupBaileys();
@@ -116,6 +132,39 @@ const successPage = (msg, sub = '') => `
 </body>
 </html>`;
 
+// QR Code Display Route
+app.get('/qr', async (req, res) => {
+  if (!currentQR) {
+    return res.send(errorPage('No QR code available. Try generating a pairing code or wait for reconnection.'));
+  }
+  try {
+    const qrUrl = await qrcode.toDataURL(currentQR);
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AAHAN QR Code</title>
+  <style>
+    body { background: linear-gradient(135deg, #667eea, #764ba2); font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; color: #fff; }
+    .box { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); padding: 30px; border-radius: 20px; text-align: center; max-width: 400px; }
+    img { max-width: 100%; margin: 20px 0; }
+    a { display: inline-block; padding: 12px 25px; background: #ffcc00; color: #333; text-decoration: none; border-radius: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Scan QR Code</h2>
+    <p>Open WhatsApp > Settings > Linked Devices > Scan this QR code</p>
+    <img src="${qrUrl}" alt="QR Code">
+    <a href="/">Back</a>
+  </div>
+</body>
+</html>`);
+  } catch (err) {
+    res.send(errorPage('Failed to generate QR code image.'));
+  }
+});
+
 // Home Route
 app.get('/', (req, res) => {
   const showKey = sendingActive && stopKey;
@@ -143,6 +192,7 @@ app.get('/', (req, res) => {
     button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
     .key { margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px; }
     .footer { margin-top: 25px; font-size: 12px; color: rgba(255,255,255,0.6); }
+    .qr-link { color: #ffcc00; text-decoration: none; font-size: 14px; margin-top: 10px; display: inline-block; }
   </style>
 </head>
 <body>
@@ -155,6 +205,7 @@ app.get('/', (req, res) => {
     <input id="ph" name="phoneNumber" placeholder="e.g., 919876543210" required>
     <button class="pair">GENERATE PAIR CODE</button>
   </form>
+  ${currentQR ? `<p><a href="/qr" class="qr-link">View QR Code for Pairing</a></p>` : ''}
 
   <form action="/send" method="post" enctype="multipart/form-data">
     <label for="tg">Target Numbers/Group IDs (comma-separated):</label>
@@ -194,24 +245,41 @@ app.post('/pair', async (req, res) => {
       throw new Error('WhatsApp socket not initialized. Wait a few seconds and try again.');
     }
 
-    // Wait for socket to be in connecting state
+    // Wait for socket to be ready
     let attempts = 0;
-    while (attempts < 10 && !MznKing.ws.readyState === 1) {
+    while (attempts < 15 && MznKing.ws.readyState !== 1) {
       logger.info('Waiting for socket to be ready...');
       await delay(1000);
       attempts++;
     }
 
     if (MznKing.ws.readyState !== 1) {
-      throw new Error('Socket not ready after 10 seconds. Please restart the server.');
+      throw new Error('Socket not ready after 15 seconds. Try QR code at /qr or restart the server.');
     }
 
     if (!MznKing.authState.creds.registered) {
-      const code = await MznKing.requestPairingCode(phoneNumber);
-      if (!code) {
-        throw new Error('Failed to generate pairing code. Try again or check logs.');
+      let code = null;
+      let pairAttempts = 0;
+      const maxPairAttempts = 3;
+
+      while (!code && pairAttempts < maxPairAttempts) {
+        try {
+          code = await MznKing.requestPairingCode(phoneNumber);
+          if (code) {
+            logger.info(`Generated pairing code for ${phoneNumber}: ${code}`);
+            break;
+          }
+        } catch (err) {
+          logger.error(`Pairing attempt ${pairAttempts + 1} failed: ${err.message}`);
+          pairAttempts++;
+          await delay(2000);
+        }
       }
-      logger.info(`Generated pairing code for ${phoneNumber}: ${code}`);
+
+      if (!code) {
+        throw new Error('Failed to generate pairing code after multiple attempts. Try QR code at /qr.');
+      }
+
       res.send(successPage(
         `Pairing Code: <strong>${code}</strong>`,
         'Open WhatsApp > Settings > Linked Devices > Link with phone number > Enter this code.'
@@ -221,7 +289,7 @@ app.post('/pair', async (req, res) => {
     }
   } catch (error) {
     logger.error(`Pairing error: ${error.message}`);
-    res.send(errorPage(`Error generating pairing code: ${error.message}. Please try again or check server logs.`));
+    res.send(errorPage(`Error generating pairing code: ${error.message}. Try QR code at <a href="/qr">/qr</a>.`));
   }
 });
 
