@@ -1,6 +1,6 @@
 const express = require('express');
-const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
-const multer = require('multer'); // Using secure version 2.0.2
+const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason, Browsers } = require("@whiskeysockets/baileys");
+const multer = require('multer'); // Secure version 2.0.2
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -42,20 +42,22 @@ const setupBaileys = async () => {
       MznKing = makeWASocket({
         printQRInTerminal: true,
         auth: state,
-        browser: ['AAHAN Server', 'Chrome', '20.0.04'],
-        logger: require('pino')({ level: 'silent' })
+        browser: Browsers.macOS('Chrome'), // Valid browser config for pairing
+        logger: require('pino')({ level: 'debug' }), // Debug logging for pairing issues
+        markOnlineOnConnect: false // Avoid rate limits
       });
 
       MznKing.ev.on('connection.update', async update => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isOnline } = update;
         if (qr) logger.info('QR Code generated. Scan in WhatsApp > Linked Devices.');
         if (connection === 'open') logger.info('WhatsApp connected successfully.');
+        if (connection === 'connecting') logger.info('Connecting to WhatsApp...');
         if (connection === 'close') {
           const code = lastDisconnect?.error?.output?.statusCode;
           const shouldReconnect = code !== DisconnectReason.loggedOut;
           logger.warn(`Connection closed. Status: ${code}`);
           if (shouldReconnect) {
-            logger.info('Reconnecting...');
+            logger.info('Reconnecting in 5 seconds...');
             setTimeout(connect, 5000);
           } else {
             logger.error('Logged out. Delete ./auth_info and restart.');
@@ -189,24 +191,37 @@ app.post('/pair', async (req, res) => {
 
   try {
     if (!MznKing) {
-      throw new Error('WhatsApp socket not initialized. Please wait a few seconds and try again.');
+      throw new Error('WhatsApp socket not initialized. Wait a few seconds and try again.');
     }
 
-    // Ensure socket is ready
+    // Wait for socket to be in connecting state
+    let attempts = 0;
+    while (attempts < 10 && !MznKing.ws.readyState === 1) {
+      logger.info('Waiting for socket to be ready...');
+      await delay(1000);
+      attempts++;
+    }
+
+    if (MznKing.ws.readyState !== 1) {
+      throw new Error('Socket not ready after 10 seconds. Please restart the server.');
+    }
+
     if (!MznKing.authState.creds.registered) {
       const code = await MznKing.requestPairingCode(phoneNumber);
-      if (!code) throw new Error('Failed to generate pairing code. Try again.');
+      if (!code) {
+        throw new Error('Failed to generate pairing code. Try again or check logs.');
+      }
       logger.info(`Generated pairing code for ${phoneNumber}: ${code}`);
       res.send(successPage(
         `Pairing Code: <strong>${code}</strong>`,
-        'Open WhatsApp > Linked Devices > Link with phone number > Enter this code.'
+        'Open WhatsApp > Settings > Linked Devices > Link with phone number > Enter this code.'
       ));
     } else {
-      res.send(errorPage('Already linked to a WhatsApp account. Disconnect first by deleting ./auth_info.'));
+      res.send(errorPage('Already linked to a WhatsApp account. Delete ./auth_info to pair a new number.'));
     }
   } catch (error) {
     logger.error(`Pairing error: ${error.message}`);
-    res.send(errorPage(`Error generating pairing code: ${error.message}`));
+    res.send(errorPage(`Error generating pairing code: ${error.message}. Please try again or check server logs.`));
   }
 });
 
